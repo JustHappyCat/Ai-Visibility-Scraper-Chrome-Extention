@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Development checks for the GEO Visibility Scraper Chrome extension.",
+  "license": "MIT",
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "test:unit": "node scripts/run-tests.mjs unit",

@@ -230,3 +230,7 @@ account variation.
 See [DOCUMENTATION.md](DOCUMENTATION.md) for the complete operating guide,
 matching specification, output schema, architecture, message flow, storage
 model, troubleshooting guide, and safe-maintenance checklist.
+
+## License
+
+Released under the [MIT License](LICENSE).
