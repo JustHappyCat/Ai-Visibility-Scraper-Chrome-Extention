@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "engine": "chatgpt",
+  "state": "latest-answer",
+  "description": "Synthetic latest assistant turn with a visible answer and citation.",
+  "source": "synthetic",
+  "expected": { "status": "ok" },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "No real conversation content."
+  }
+}

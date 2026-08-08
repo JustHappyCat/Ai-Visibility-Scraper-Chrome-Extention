@@ -1,5 +1,31 @@
 // background.js - batch runner and active-tab dispatcher.
 
+import {
+  parseBoundedInteger,
+  parsePrompts,
+  parseTargets,
+} from "./core/parsing.js";
+import { enrichResult } from "./core/matching.js";
+import { classifyResult } from "./core/results.js";
+import {
+  isTrustedRuntimeSender,
+  validateAdapterResult,
+  validateMessage,
+} from "./core/contracts.js";
+import {
+  assertRunUpdateAllowed,
+  compactRunEnvelope,
+  compactScrapeEnvelope,
+  failureResult,
+} from "./core/lifecycle.js";
+import {
+  DEFAULT_STORAGE_BUDGET_BYTES,
+  migrateStoredState,
+  pruneHistory,
+  serializedBytes,
+  STORAGE_SCHEMA_VERSION,
+} from "./core/storage-policy.js";
+
 const ENGINES = {
   chatgpt: {
     label: "ChatGPT",
@@ -25,24 +51,34 @@ const RUN_KEY = "geoRun";
 const LAST_KEY = "geoLast";
 const HISTORY_KEY = "geoHistory";
 const SETTINGS_KEY = "geoSettings";
+const SCHEMA_KEY = "geoSchemaVersion";
+const STORAGE_NOTICE_KEY = "geoStorageNotice";
+const MANUAL_TARGET_KEY = "geoManualTarget";
 const REUSABLE_SESSION_LIMIT = 5;
+const DASHBOARD_URL = chrome.runtime.getURL("src/popup/popup.html");
 let cancelRequested = false;
 let resetRequested = false;
 let activeRunPromise = null;
+let storageInitializationPromise = null;
 const activeTempTabIds = new Set();
+const terminalRunIds = new Set();
+const supportedTabRecency = new Map();
+let originatingManualTarget = null;
+let lastSupportedTarget = null;
+let recencySequence = 0;
+let lastSupportedSequence = 0;
 
 async function openDashboardWindow() {
-  const url = chrome.runtime.getURL("src/popup/popup.html");
-  const [existing] = await chrome.tabs.query({ url });
-  if (existing && existing.id) {
+  const [existing] = await chrome.tabs.query({ url: DASHBOARD_URL });
+  if (existing && Number.isInteger(existing.id)) {
     await chrome.tabs.update(existing.id, { active: true });
-    if (existing.windowId) {
+    if (Number.isInteger(existing.windowId)) {
       await chrome.windows.update(existing.windowId, { focused: true });
     }
     return;
   }
   await chrome.windows.create({
-    url,
+    url: DASHBOARD_URL,
     type: "normal",
     width: 820,
     height: 920,
@@ -79,6 +115,107 @@ function adapterForUrl(url) {
   return found ? found[1].adapter : null;
 }
 
+function isSupportedTab(tab) {
+  return Boolean(tab && Number.isInteger(tab.id) && engineForUrl(tab.url || ""));
+}
+
+function manualTargetFromTab(tab) {
+  return {
+    tabId: tab.id,
+    windowId: tab.windowId,
+  };
+}
+
+function rememberSupportedTab(tab, sequence = ++recencySequence) {
+  if (!isSupportedTab(tab)) return;
+  supportedTabRecency.set(tab.id, Math.max(sequence, supportedTabRecency.get(tab.id) || 0));
+  if (sequence >= lastSupportedSequence) {
+    lastSupportedSequence = sequence;
+    lastSupportedTarget = manualTargetFromTab(tab);
+  }
+}
+
+function selectedTabSummary(tab) {
+  const found = engineForUrl(tab.url || "");
+  if (!found) return null;
+  const [engine, config] = found;
+  let hostname = "";
+  try {
+    hostname = new URL(tab.url).hostname;
+  } catch (_err) {
+    // Supported engine URLs are valid HTTPS URLs; retain an empty hostname if
+    // Chrome reports a transient value while a tab is navigating.
+  }
+  return { engine, label: config.label, title: tab.title || "", hostname };
+}
+
+async function persistManualTarget(target) {
+  // Session storage survives an MV3 service-worker restart without retaining the
+  // page selection beyond the current browser session.
+  if (!chrome.storage.session) return;
+  if (target) {
+    await chrome.storage.session.set({ [MANUAL_TARGET_KEY]: target });
+  } else {
+    await chrome.storage.session.remove(MANUAL_TARGET_KEY);
+  }
+}
+
+async function captureManualOrigin(tab) {
+  originatingManualTarget = isSupportedTab(tab) ? manualTargetFromTab(tab) : null;
+  if (originatingManualTarget) rememberSupportedTab(tab);
+  await persistManualTarget(originatingManualTarget).catch(() => {});
+}
+
+async function restoreManualOrigin() {
+  if (originatingManualTarget || !chrome.storage.session) return originatingManualTarget;
+  const stored = await chrome.storage.session.get(MANUAL_TARGET_KEY).catch(() => ({}));
+  const target = stored && stored[MANUAL_TARGET_KEY];
+  if (target && Number.isInteger(target.tabId)) originatingManualTarget = target;
+  return originatingManualTarget;
+}
+
+async function resolveSupportedTarget(target) {
+  if (!target || !Number.isInteger(target.tabId)) return null;
+  const tab = await chrome.tabs.get(target.tabId).catch(() => null);
+  if (!isSupportedTab(tab)) return null;
+  if (Number.isInteger(target.windowId) && tab.windowId !== target.windowId) return null;
+  return tab;
+}
+
+function compareSupportedTabs(a, b) {
+  const sequenceDifference = (supportedTabRecency.get(b.id) || 0) - (supportedTabRecency.get(a.id) || 0);
+  if (sequenceDifference) return sequenceDifference;
+
+  const accessDifference = (Number(b.lastAccessed) || 0) - (Number(a.lastAccessed) || 0);
+  if (accessDifference) return accessDifference;
+
+  // Stable tie-breakers make selection predictable on Chrome versions that do
+  // not expose lastAccessed.
+  if (a.active !== b.active) return a.active ? -1 : 1;
+  if (a.windowId !== b.windowId) return b.windowId - a.windowId;
+  return b.id - a.id;
+}
+
+async function getManualTargetTab() {
+  const origin = await resolveSupportedTarget(await restoreManualOrigin());
+  if (origin) return origin;
+
+  if (originatingManualTarget) {
+    originatingManualTarget = null;
+    await persistManualTarget(null).catch(() => {});
+  }
+
+  const recent = await resolveSupportedTarget(lastSupportedTarget);
+  if (recent) return recent;
+
+  const candidates = (await chrome.tabs.query({})).filter(isSupportedTab).sort(compareSupportedTabs);
+  if (!candidates.length) {
+    throw new Error("No supported page is available. Open ChatGPT, Google Search, or Perplexity and try again.");
+  }
+  rememberSupportedTab(candidates[0]);
+  return candidates[0];
+}
+
 function engineUrl(engine, prompt) {
   if (engine === "google-aio") {
     return `${ENGINES[engine].home}?q=${encodeURIComponent(prompt)}`;
@@ -95,19 +232,70 @@ async function storageGet(key, fallback) {
   return Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : fallback;
 }
 
-async function storageSet(values) {
-  if (resetRequested) return;
-  await chrome.storage.local.set(values);
+async function ensureStorageInitialized() {
+  if (!storageInitializationPromise) {
+    storageInitializationPromise = (async () => {
+      const stored = await chrome.storage.local.get(null);
+      const migrated = migrateStoredState(stored);
+      if (JSON.stringify(stored) !== JSON.stringify(migrated)) {
+        await chrome.storage.local.set(migrated);
+      }
+      return migrated;
+    })().catch((error) => {
+      storageInitializationPromise = null;
+      throw error;
+    });
+  }
+  return storageInitializationPromise;
 }
 
-async function getActiveTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error("No active tab.");
-  return tab;
+async function storageSet(values) {
+  if (resetRequested) return;
+  const payload = { [SCHEMA_KEY]: STORAGE_SCHEMA_VERSION, ...values };
+  try {
+    await chrome.storage.local.set(payload);
+  } catch (error) {
+    const message = String((error && error.message) || error);
+    if (!/quota|QUOTA_BYTES/i.test(message)) throw error;
+
+    const stored = await chrome.storage.local.get([HISTORY_KEY, RUN_KEY, SETTINGS_KEY, LAST_KEY]);
+    const originalHistory = Array.isArray(payload[HISTORY_KEY])
+      ? payload[HISTORY_KEY]
+      : Array.isArray(stored[HISTORY_KEY])
+        ? stored[HISTORY_KEY]
+        : [];
+    let history = pruneHistory(originalHistory, {
+      baseBytes: serializedBytes({
+        [RUN_KEY]: payload[RUN_KEY] ?? stored[RUN_KEY] ?? null,
+        [SETTINGS_KEY]: payload[SETTINGS_KEY] ?? stored[SETTINGS_KEY] ?? null,
+        [LAST_KEY]: payload[LAST_KEY] ?? stored[LAST_KEY] ?? null,
+      }),
+      budgetBytes: DEFAULT_STORAGE_BUDGET_BYTES,
+      maxRuns: 20,
+    }).history;
+
+    while (history.length) {
+      if (history.length === originalHistory.length) history = history.slice(0, -1);
+      const removedIds = originalHistory.slice(history.length).map((run) => run?.id).filter(Boolean);
+      try {
+        await chrome.storage.local.set({
+          ...payload,
+          [HISTORY_KEY]: history,
+          [STORAGE_NOTICE_KEY]: { pruned: removedIds.length, removedIds, timestamp: nowIso() },
+        });
+        return;
+      } catch (retryError) {
+        if (!/quota|QUOTA_BYTES/i.test(String(retryError?.message || retryError))) throw retryError;
+        history = history.slice(0, -1);
+      }
+    }
+    throw new Error("Local storage is full. The active run was preserved; export or clear older runs, then try again.");
+  }
 }
 
 async function ensureInjected(tab) {
-  const liveTab = tab && tab.id ? await chrome.tabs.get(tab.id).catch(() => tab) : tab;
+  if (!tab || !Number.isInteger(tab.id)) throw new Error("No valid target tab is available.");
+  const liveTab = await chrome.tabs.get(tab.id).catch(() => null);
   const adapter = adapterForUrl((liveTab && liveTab.url) || "");
   if (!adapter) {
     throw new Error(`Target tab is not a supported site: ${(liveTab && liveTab.url) || "unknown URL"}`);
@@ -161,157 +349,33 @@ function waitForTabComplete(tabId, timeout = 60000) {
   });
 }
 
-function numberOr(value, fallback) {
-  if (value === undefined || value === null || value === "") return fallback;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function parsePrompts(raw) {
-  return String(raw || "")
-    .split(/[\n,]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function parseTargets(raw) {
-  return String(raw || "")
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const parts = line.split("|").map((p) => p.trim());
-      const name = parts[0];
-      const aliases = splitList(parts[1]);
-      const domains = splitList(parts[2]).map(cleanDomain);
-      if (!parts[1] && !parts[2] && line.includes(",")) {
-        const values = splitList(line);
-        return {
-          name: values[0] || name,
-          aliases: values.slice(1).filter((v) => !looksLikeDomain(v)),
-          domains: values.filter(looksLikeDomain).map(cleanDomain),
-        };
-      }
-      return { name, aliases, domains };
-    })
-    .filter((target) => target.name);
-}
-
-function splitList(raw) {
-  return String(raw || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function looksLikeDomain(value) {
-  return /(^|\.)[a-z0-9-]+\.[a-z]{2,}($|\/)/i.test(value);
-}
-
-function cleanDomain(value) {
-  try {
-    const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-    return new URL(withScheme).hostname.replace(/^www\./, "").toLowerCase();
-  } catch (e) {
-    return String(value || "").replace(/^www\./, "").toLowerCase();
-  }
-}
-
-function normalizeText(value) {
-  return String(value || "").toLowerCase();
-}
-
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function findTerm(text, term, loose) {
-  if (!term) return null;
-  const source = String(text || "");
-  if (!source) return null;
-  if (loose) {
-    const index = normalizeText(source).indexOf(normalizeText(term));
-    return index >= 0 ? { index, term } : null;
-  }
-  const rx = new RegExp(`(^|[^a-z0-9])(${escapeRegex(term)})(?=$|[^a-z0-9])`, "i");
-  const match = source.match(rx);
-  if (!match) return null;
-  return { index: match.index + (match[1] ? match[1].length : 0), term: match[2] };
-}
-
-function snippet(text, index, size = 90) {
-  const source = String(text || "").replace(/\s+/g, " ").trim();
-  if (!source) return "";
-  const start = Math.max(0, index - size);
-  const end = Math.min(source.length, index + size);
-  return `${start > 0 ? "..." : ""}${source.slice(start, end)}${end < source.length ? "..." : ""}`;
-}
-
-function matchTarget(result, target) {
-  const answerText = result.answerText || "";
-  const thinkingText = result.thinkingText || "";
-  const sourceText = (result.sources || [])
-    .map((source) => `${source.domain || ""} ${source.url || ""} ${source.text || ""}`)
-    .join(" ");
-  const terms = [target.name, ...(target.aliases || [])].filter(Boolean);
-  const domains = (target.domains || []).filter(Boolean);
-  const answerHits = [];
-  const thinkingHits = [];
-  const sourceHits = [];
-  const searchTerms = [...terms, ...domains];
-
-  for (const term of terms) {
-    const hit = findTerm(answerText, term, false);
-    if (hit) answerHits.push({ term, snippet: snippet(answerText, hit.index), where: "answer" });
-  }
-  for (const domain of domains) {
-    const hit = findTerm(answerText, domain, true);
-    if (hit) answerHits.push({ term: domain, snippet: snippet(answerText, hit.index), where: "answer" });
-  }
-  for (const term of searchTerms) {
-    const hit = findTerm(thinkingText, term, true);
-    if (hit) thinkingHits.push({ term, snippet: snippet(thinkingText, hit.index), where: "thinking" });
-  }
-  for (const term of searchTerms) {
-    const hit = findTerm(sourceText, term, true);
-    if (hit) sourceHits.push({ term, snippet: snippet(sourceText, hit.index), where: "source" });
-  }
-
-  const mentioned = answerHits.length > 0 || thinkingHits.length > 0 || sourceHits.length > 0;
-  return {
-    business: target.name,
-    aliases: target.aliases || [],
-    domains,
-    mentioned,
-    inText: answerHits.length > 0,
-    inAnswer: answerHits.length > 0,
-    inThinking: thinkingHits.length > 0,
-    inSources: sourceHits.length > 0,
-    snippets: [...answerHits, ...thinkingHits, ...sourceHits].slice(0, 5),
-  };
-}
-
-function enrichResult(result, prompt, targets) {
-  const clean = Object.assign({}, result, { prompt });
-  clean.matches = targets.map((target) => matchTarget(clean, target));
-  clean.visibility = {
-    businessCount: clean.matches.length,
-    mentionedCount: clean.matches.filter((m) => m.mentioned).length,
-  };
-  return clean;
-}
-
 async function updateRun(patch) {
   const existing = await storageGet(RUN_KEY, null);
+  assertRunUpdateAllowed(existing, existing?.id, patch.status || existing?.status);
   const next = Object.assign({}, existing || {}, patch, { updatedAt: nowIso() });
-  await storageSet({ [RUN_KEY]: next, [LAST_KEY]: { ok: true, result: next, ts: Date.now() } });
+  await storageSet({
+    [RUN_KEY]: next,
+    [LAST_KEY]: compactRunEnvelope(next),
+  });
   return next;
 }
 
 async function appendHistory(run) {
   const history = await storageGet(HISTORY_KEY, []);
+  const settings = await storageGet(SETTINGS_KEY, null);
   const completed = Object.assign({}, run, { archivedAt: nowIso() });
-  await storageSet({ [HISTORY_KEY]: [completed, ...history.filter((item) => item.id !== run.id)].slice(0, 20) });
+  const next = [completed, ...history.filter((item) => item.id !== run.id)];
+  const retained = pruneHistory(next, {
+    baseBytes: serializedBytes({ run, settings }),
+    budgetBytes: DEFAULT_STORAGE_BUDGET_BYTES,
+    maxRuns: 20,
+  });
+  await storageSet({
+    [HISTORY_KEY]: retained.history,
+    [STORAGE_NOTICE_KEY]: retained.pruned
+      ? { pruned: retained.pruned, removedIds: retained.removedIds, timestamp: nowIso() }
+      : null,
+  });
 }
 
 async function closeTempTabs() {
@@ -337,7 +401,7 @@ async function markCurrentRunCancelled() {
     finishedAt: nowIso(),
     updatedAt: nowIso(),
   });
-  await storageSet({ [RUN_KEY]: cancelledRun, [LAST_KEY]: { ok: true, result: cancelledRun, ts: Date.now() } });
+  await storageSet({ [RUN_KEY]: cancelledRun, [LAST_KEY]: compactRunEnvelope(cancelledRun) });
   await appendHistory(cancelledRun);
   return cancelledRun;
 }
@@ -345,8 +409,12 @@ async function markCurrentRunCancelled() {
 async function resetExtensionData() {
   resetRequested = true;
   cancelRequested = true;
+  originatingManualTarget = null;
+  lastSupportedTarget = null;
+  supportedTabRecency.clear();
   await closeTempTabs();
   await chrome.storage.local.clear();
+  await persistManualTarget(null).catch(() => {});
   setTimeout(() => chrome.runtime.reload(), 500);
   return { ok: true, reset: true };
 }
@@ -355,7 +423,9 @@ async function scrapeTab(tab) {
   const liveTab = await ensureInjected(tab);
   const response = await chrome.tabs.sendMessage(liveTab.id, { type: "SCRAPE" });
   if (!response || !response.ok) throw new Error((response && response.error) || "Scrape failed.");
-  return response.result;
+  const found = engineForUrl(liveTab.url || "");
+  if (!found) throw new Error("Scrape completed on an unsupported page.");
+  return validateAdapterResult(response.result, found[0]);
 }
 
 async function runPromptInTab(tab, engine, prompt) {
@@ -369,10 +439,10 @@ async function runPromptInTab(tab, engine, prompt) {
   if (!started || !started.ok || !started.result || !started.result.jobId) {
     throw new Error((started && started.error) || "Prompt job did not start.");
   }
-  return pollPromptJob(liveTab.id, started.result.jobId);
+  return pollPromptJob(liveTab.id, started.result.jobId, engine);
 }
 
-async function pollPromptJob(tabId, jobId, timeout = 210000) {
+async function pollPromptJob(tabId, jobId, engine, timeout = 210000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     if (cancelRequested) throw new Error("Run cancelled.");
@@ -383,7 +453,7 @@ async function pollPromptJob(tabId, jobId, timeout = 210000) {
       throw new Error((response && response.error) || "Prompt job status failed.");
     }
     const job = response.result;
-    if (job.status === "complete") return job.result;
+    if (job.status === "complete") return validateAdapterResult(job.result, engine);
     if (job.status === "error") throw new Error(job.error || "Prompt job failed.");
   }
   throw new Error("Timed out waiting for prompt job to finish.");
@@ -466,8 +536,8 @@ async function startBatch(config) {
   const prompts = parsePrompts(config.prompts);
   const targets = parseTargets(config.targets);
   const engines = (config.engines || []).filter((engine) => ENGINES[engine]);
-  const throttleMs = Math.max(0, numberOr(config.throttleMs, 3000));
-  const retries = Math.max(0, Math.min(2, numberOr(config.retries, 1)));
+  const throttleMs = parseBoundedInteger(config.throttleMs, { fallback: 3000, min: 0, max: 600000 });
+  const retries = parseBoundedInteger(config.retries, { fallback: 1, min: 0, max: 2 });
   if (!prompts.length) throw new Error("Add at least one prompt.");
   if (!targets.length) throw new Error("Add at least one target business.");
   if (!engines.length) throw new Error("Select at least one engine.");
@@ -490,7 +560,7 @@ async function startBatch(config) {
     startedAt: nowIso(),
     updatedAt: nowIso(),
   };
-  await storageSet({ [SETTINGS_KEY]: config, [RUN_KEY]: run, [LAST_KEY]: { ok: true, result: run, ts: Date.now() } });
+  await storageSet({ [SETTINGS_KEY]: config, [RUN_KEY]: run, [LAST_KEY]: compactRunEnvelope(run) });
 
   activeRunPromise = executeBatch(run).catch(async (err) => {
     const existing = await storageGet(RUN_KEY, run);
@@ -505,7 +575,7 @@ async function startBatch(config) {
     await storageSet({
       [RUN_KEY]: failedRun,
       [LAST_KEY]: isCancelError(err)
-        ? { ok: true, result: failedRun, ts: Date.now() }
+        ? compactRunEnvelope(failedRun)
         : { ok: false, error, ts: Date.now() },
     });
     await appendHistory(failedRun);
@@ -537,7 +607,10 @@ async function executeBatch(run) {
           try {
             if (cancelRequested) throw new Error("Run cancelled.");
             const raw = await runEnginePrompt(engine, prompt, sessions);
-            const result = enrichResult(raw, prompt, current.targets);
+            const result = enrichResult(raw, prompt, current.targets, classifyResult);
+            if (result.classification.kind === "failure") {
+              throw new Error(`Extraction failed with status: ${result.status || "unknown"}.`);
+            }
             current = await updateRun({
               completed: current.completed + 1,
               results: [...current.results, result],
@@ -561,9 +634,11 @@ async function executeBatch(run) {
         }
 
         if (lastError) {
+          const failedResult = failureResult(engine, prompt, current.targets, lastError);
           current = await updateRun({
             completed: current.completed + 1,
             failed: current.failed + 1,
+            results: [...current.results, failedResult],
             errors: [...current.errors, { prompt, engine, error: lastError, timestamp: nowIso() }],
             current: null,
           });
@@ -581,15 +656,19 @@ async function executeBatch(run) {
 }
 
 async function handleActiveScrape() {
-  const tab = await getActiveTab();
+  const tab = await getManualTargetTab();
   const result = await scrapeTab(tab);
-  await storageSet({ [LAST_KEY]: { ok: true, result, ts: Date.now() } });
-  return { ok: true, result };
+  await storageSet({ [LAST_KEY]: compactScrapeEnvelope(result) });
+  return {
+    ok: true,
+    result,
+    selectedTab: selectedTabSummary(tab),
+  };
 }
 
 async function handleActiveRun(msg) {
   if (activeRunPromise) throw new Error("A run is already active.");
-  const tab = await getActiveTab();
+  const tab = await getManualTargetTab();
   const found = engineForUrl(tab.url || "");
   if (!found) throw new Error("Run requires the active tab to be ChatGPT, Google Search, or Perplexity.");
   const [engine] = found;
@@ -619,7 +698,7 @@ async function handleActiveRun(msg) {
   await storageSet({
     [SETTINGS_KEY]: Object.assign({}, config, { prompts: config.prompts || prompt }),
     [RUN_KEY]: run,
-    [LAST_KEY]: { ok: true, result: run, ts: Date.now() },
+    [LAST_KEY]: compactRunEnvelope(run),
   });
 
   activeRunPromise = executeActiveRun(tab.id, engine, prompt, targets, run).catch(async (err) => {
@@ -633,13 +712,16 @@ async function handleActiveRun(msg) {
       errors: isCancelError(err)
         ? existing.errors || []
         : [...(existing.errors || []), { prompt, engine, error, timestamp: nowIso() }],
+      results: isCancelError(err)
+        ? existing.results || []
+        : [...(existing.results || []), failureResult(engine, prompt, targets, error)],
       finishedAt: nowIso(),
       updatedAt: nowIso(),
     });
     await storageSet({
       [RUN_KEY]: failedRun,
       [LAST_KEY]: isCancelError(err)
-        ? { ok: true, result: failedRun, ts: Date.now() }
+        ? compactRunEnvelope(failedRun)
         : { ok: false, error, ts: Date.now() },
     });
     await appendHistory(failedRun);
@@ -647,7 +729,12 @@ async function handleActiveRun(msg) {
     activeRunPromise = null;
   });
 
-  return { ok: true, started: true, runId: run.id };
+  return {
+    ok: true,
+    started: true,
+    runId: run.id,
+    selectedTab: selectedTabSummary(tab),
+  };
 }
 
 async function executeActiveRun(tabId, engine, prompt, targets, run) {
@@ -660,7 +747,10 @@ async function executeActiveRun(tabId, engine, prompt, targets, run) {
     tab = await chrome.tabs.get(tabId);
   }
   const raw = await runPromptInTab(tab, engine, prompt);
-  const result = enrichResult(raw, prompt, targets);
+  const result = enrichResult(raw, prompt, targets, classifyResult);
+  if (result.classification.kind === "failure") {
+    throw new Error(`Extraction failed with status: ${result.status || "unknown"}.`);
+  }
   const completeRun = Object.assign({}, run, {
     status: "complete",
     completed: 1,
@@ -671,9 +761,25 @@ async function executeActiveRun(tabId, engine, prompt, targets, run) {
   });
   await storageSet({
     [RUN_KEY]: completeRun,
-    [LAST_KEY]: { ok: true, result: completeRun, ts: Date.now() },
+    [LAST_KEY]: compactRunEnvelope(completeRun),
   });
   await appendHistory(completeRun);
+}
+
+async function recoverInterruptedRun(run) {
+  if (!run || run.status !== "running" || activeRunPromise) return run;
+  const error = "The background service worker restarted before this run finished.";
+  const interrupted = {
+    ...run,
+    status: "failed",
+    current: null,
+    errors: [...(run.errors || []), { error, reason: "worker-interrupted", timestamp: nowIso() }],
+    finishedAt: nowIso(),
+    updatedAt: nowIso(),
+  };
+  await storageSet({ [RUN_KEY]: interrupted, [LAST_KEY]: { ok: false, error, ts: Date.now() } });
+  await appendHistory(interrupted);
+  return interrupted;
 }
 
 async function handle(msg) {
@@ -685,11 +791,14 @@ async function handle(msg) {
     return { ok: true, cancelling: true, run };
   }
   if (msg.type === "GET_GEO_STATE") {
+    const run = await recoverInterruptedRun(await storageGet(RUN_KEY, null));
     return {
       ok: true,
-      run: await storageGet(RUN_KEY, null),
+      run,
       history: await storageGet(HISTORY_KEY, []),
       settings: await storageGet(SETTINGS_KEY, null),
+      storageNotice: await storageGet(STORAGE_NOTICE_KEY, null),
+      schemaVersion: await storageGet(SCHEMA_KEY, STORAGE_SCHEMA_VERSION),
     };
   }
   if (msg.type === "CLEAR_GEO_HISTORY") {
@@ -705,13 +814,49 @@ async function handle(msg) {
   throw new Error("Unknown action: " + msg.type);
 }
 
-chrome.action.onClicked.addListener(() => {
-  openDashboardWindow().catch(() => {});
+chrome.action.onClicked.addListener((tab) => {
+  // Record the source before focusing or creating the dashboard window.
+  captureManualOrigin(tab)
+    .then(openDashboardWindow)
+    .catch(() => {});
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  const sequence = ++recencySequence;
+  chrome.tabs.get(activeInfo.tabId).then((tab) => rememberSupportedTab(tab, sequence)).catch(() => {});
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  const sequence = ++recencySequence;
+  chrome.tabs
+    .query({ active: true, windowId })
+    .then(([tab]) => rememberSupportedTab(tab, sequence))
+    .catch(() => {});
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  supportedTabRecency.delete(tabId);
+  if (lastSupportedTarget && lastSupportedTarget.tabId === tabId) lastSupportedTarget = null;
+  if (!originatingManualTarget || originatingManualTarget.tabId !== tabId) return;
+  originatingManualTarget = null;
+  persistManualTarget(null).catch(() => {});
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || !msg.type) return;
-  handle(msg)
+  let validatedMessage;
+  try {
+    if (!isTrustedRuntimeSender(sender, chrome.runtime.id, DASHBOARD_URL)) {
+      throw new Error("This action is only available to the extension dashboard.");
+    }
+    validatedMessage = validateMessage(msg);
+  } catch (error) {
+    sendResponse({ ok: false, error: String((error && error.message) || error) });
+    return false;
+  }
+
+  ensureStorageInitialized()
+    .then(() => handle(validatedMessage))
     .then((response) => sendResponse(response && response.ok !== undefined ? response : { ok: true, response }))
     .catch((e) => sendResponse({ ok: false, error: String((e && e.message) || e) }));
   return true;

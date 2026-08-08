@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "engine": "google-aio",
+  "state": "ordinary-serp",
+  "description": "Ordinary search prose must not be accepted as an AI Overview.",
+  "source": "synthetic",
+  "expected": { "status": "no-ai-overview" },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "Synthetic result-column regression fixture."
+  }
+}

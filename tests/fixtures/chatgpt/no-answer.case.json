@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "engine": "chatgpt",
+  "state": "no-answer",
+  "description": "Composer-only state with no assistant response.",
+  "source": "synthetic",
+  "expected": { "status": "no-answer-found" },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "Synthetic empty conversation state."
+  }
+}

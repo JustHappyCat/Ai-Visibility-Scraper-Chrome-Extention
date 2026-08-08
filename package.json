@@ -1,0 +1,24 @@
+{
+  "name": "geo-visibility-scraper",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Development checks for the GEO Visibility Scraper Chrome extension.",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "test:unit": "node scripts/run-tests.mjs unit",
+    "test:adapters": "node scripts/run-tests.mjs adapters",
+    "test:ui": "node scripts/run-tests.mjs ui",
+    "check:syntax": "node scripts/check-syntax.mjs",
+    "check:manifest": "node scripts/check-manifest.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "check:format": "node scripts/check-style.mjs",
+    "check:lint": "node scripts/check-lint.mjs",
+    "check:style": "npm run check:format",
+    "check": "npm run check:syntax && npm run check:format && npm run check:lint && npm run check:manifest && npm run check:package && npm run check:secrets && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

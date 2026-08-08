@@ -1,5 +1,9 @@
 # GEO Visibility Scraper Documentation
 
+> **Release status: experimental beta.** The extension depends on frequently
+> changing third-party interfaces. Treat results as measurements of visible page
+> output, verify important findings, and expect periodic selector maintenance.
+
 ## 1. Purpose and scope
 
 GEO Visibility Scraper measures the appearance of target businesses, brands,
@@ -48,8 +52,10 @@ including a background service worker, content scripts, `chrome.scripting`,
 5. Select the directory containing `manifest.json`.
 6. Optionally pin the extension from Chrome's Extensions menu.
 
-The project uses plain HTML, CSS, and JavaScript. There is no compilation,
-dependency installation, environment file, API key, or configuration file.
+The extension uses plain HTML, CSS, and JavaScript, with no compilation or
+runtime package dependency. Development checks require Node.js 22 or newer and
+`npm ci`; the current lockfile installs no third-party packages. The extension
+does not require an environment file, API key, or configuration file.
 
 After a source change, select **Reload** for the extension on
 `chrome://extensions`. Refresh any already-open supported website before testing
@@ -62,8 +68,8 @@ already open, the extension focuses that window instead of creating another.
 
 ### Prompts
 
-Enter prompts separated by new lines or commas. Empty entries are discarded.
-Both examples below create three prompts:
+Enter one prompt per line. Empty lines are discarded, surrounding whitespace is
+trimmed, and Unicode text is normalized. Commas remain part of a prompt.
 
 ```text
 Best CRM for a small agency
@@ -71,13 +77,8 @@ Best accounting software for a startup
 Best project management tool for consultants
 ```
 
-```text
-Best CRM for a small agency, Best accounting software for a startup, Best project management tool for consultants
-```
-
-Because commas are separators, a prompt containing a meaningful comma will be
-split into separate prompts. Use phrasing without commas when the prompt must
-remain one job.
+For example, `Compare cost, security, and support` remains one job rather than
+being split at its commas.
 
 ### Target businesses
 
@@ -100,16 +101,17 @@ Parsing rules:
 - Text before the first `|` is the required display name.
 - The second field is an optional comma-separated alias list.
 - The third field is an optional comma-separated domain list.
-- Additional `|` fields are ignored.
+- More than three `|` fields make the line invalid.
 - A domain may include a scheme or `www.`; it is normalized to its lowercase
   hostname.
 - A line with no `|` but containing commas is also accepted. The first item is
   used as the name, domain-looking items become domains, and the remaining items
   become aliases.
-- Blank lines and targets with an empty name are ignored.
+- Blank lines are ignored. An empty name, malformed domain, or other invalid
+  nonblank line prevents the run from starting and reports the line number.
 
-Use specific aliases. A short or generic alias can create false positives,
-especially because source and visible-activity matching uses substring checks.
+Use specific aliases. Names and aliases use Unicode-aware non-alphanumeric
+boundaries, but short or generic terms can still create misleading matches.
 
 ### Engines, delay, and retries
 
@@ -128,6 +130,11 @@ number of prompts x number of selected engines
 
 Jobs run sequentially in prompt-first, engine-second order. A failed attempt is
 retried before the runner advances to the next job.
+
+The following example shows a configured three-prompt campaign with one target
+business and all supported engines enabled:
+
+![Configured campaign inputs and engine selection](assets/screenshots/Dashboard%20prompt.png)
 
 ## 5. Running and controlling a batch
 
@@ -167,13 +174,35 @@ stop.
 
 Only one batch or active-tab prompt run can execute at a time.
 
+### Reading completed results
+
+The completed-run summary reports eligible successful answers separately from
+unavailable surfaces and technical failures. The visibility percentages shown
+by engine and business use only eligible target-result rows.
+
+![Completed batch status and visibility summaries](assets/screenshots/Run%20result.png)
+
+Recent-result cards show the engine, prompt, extraction status, matched target
+locations, and a bounded evidence excerpt. A target may match answer text,
+visible activity/reasoning, cited sources, or more than one location.
+
+![Recent result cards and target match locations](assets/screenshots/Run%20result2.png)
+
 ## 6. Active-tab tools
 
 ### Scrape Active Tab
 
-**Scrape Active Tab** injects the shared helper and appropriate adapter into the
-currently active supported tab, then reads the page without submitting a new
-prompt. The raw result is displayed as formatted JSON in the dashboard.
+When the extension icon is clicked on a supported page, the service worker saves
+that originating tab before opening or focusing the dashboard. **Scrape Active
+Tab** injects the shared helper and appropriate adapter into that saved page,
+then reads it without submitting a new prompt. The dashboard is never selected
+as the scrape target merely because it now has focus.
+
+If the originating tab was closed or navigated away, the extension chooses the
+most recently observed supported tab across Chrome windows, using Chrome's last
+access time and stable tie-breakers as fallbacks. If none exists, it asks the
+user to open ChatGPT, Google Search, or Perplexity. The chosen engine, title, and
+hostname are returned with the action response for diagnostics.
 
 Use this for:
 
@@ -184,8 +213,8 @@ Use this for:
 
 ### Run Active Tab
 
-**Run Active Tab** takes the first prompt from the prompt field and runs it in
-the current supported tab. Targets are read from the current form.
+**Run Active Tab** takes the first nonempty prompt line and runs it in the same
+resolved supported tab. Targets are read from the current form.
 
 - ChatGPT and Perplexity receive the prompt through their current composer.
 - A Google tab is navigated to the corresponding search query before scraping.
@@ -195,19 +224,20 @@ It intentionally uses only the first prompt.
 
 ## 7. Matching behavior
 
-Matching happens locally in `src/background.js` after an adapter returns a
-scrape result.
+Matching happens locally through `src/core/matching.js` after an adapter returns
+a scrape result.
 
 For each target:
 
 - The business name and aliases are matched case-insensitively in answer text
   with non-alphanumeric boundaries. For example, `Acme` matches `Acme CRM` but
   does not match `Acmeology`.
-- Domains are matched case-insensitively as substrings in answer text.
-- Names, aliases, and domains are matched case-insensitively as substrings in
-  visible activity/reasoning text.
-- Names, aliases, and domains are matched against one combined string containing
-  every source domain, URL, and visible link label.
+- Domains use the same bounded text matching in answer and visible
+  activity/reasoning text.
+- Names and aliases use bounded matching against each source's visible label.
+- Source domains are compared as normalized hostnames. An exact hostname or
+  subdomain matches; unrelated hosts that merely contain the configured text do
+  not.
 
 The generated flags are:
 
@@ -223,10 +253,12 @@ Up to five snippets are stored per target, in answer-hit, activity/reasoning-hit
 then source-hit order. The first available snippet is shown in the dashboard and
 included in each CSV/report detail row.
 
-Visibility percentages are row based. If a run has five prompts, three engines,
-and two targets, it can produce 30 target-result rows. Each business percentage
-is its mentioned rows divided by its total rows; each engine percentage is the
-same calculation across all targets for that engine.
+Visibility percentages are row based and use only eligible results. If a run has
+five prompts, three engines, and two targets, it can produce up to 30
+target-result rows. Each business percentage is mentioned eligible rows divided
+by eligible rows for that business; each engine percentage applies the same
+calculation across its targets. `no-ai-overview` and technical failures are
+displayed separately and do not count as negative visibility.
 
 ## 8. Engine adapters
 
@@ -291,6 +323,11 @@ A successful adapter result is enriched into a structure similar to:
     { "url": "https://example.com/page", "text": "Example", "domain": "example.com" }
   ],
   "status": "ok",
+  "classification": {
+    "kind": "success",
+    "eligible": true,
+    "reason": "ok"
+  },
   "debug": {
     "answerChars": 1200,
     "thinkingChars": 240,
@@ -323,6 +360,17 @@ engines, delay, retry count, total/completed/failed counts, results, errors, the
 current job when applicable, and ISO timestamps. Run identifiers begin with
 `geo-`; active-tab run identifiers begin with `geo-active-`.
 
+Every enriched result has one classification:
+
+| Kind | Current status mapping | Visibility eligible |
+| --- | --- | --- |
+| `success` | `ok` | Yes |
+| `unavailable` | `no-ai-overview` | No; this is a valid observation that Google did not expose an overview. |
+| `failure` | Any other or unknown status, including `no-answer-found` and `ai-overview-empty` | No; automation retries it and records an error if retries are exhausted. |
+
+This distinction prevents a missing surface or broken extraction from silently
+lowering a target's visibility percentage.
+
 ## 10. Local storage
 
 All extension-managed state is in `chrome.storage.local`:
@@ -333,6 +381,21 @@ All extension-managed state is in `chrome.storage.local`:
 | `geoRun` | Current run or most recently updated run. |
 | `geoHistory` | Up to 20 completed, cancelled, or failed archived runs, newest first. |
 | `geoLast` | Compatibility/debug envelope containing the most recent result, run update, pending message, or error. |
+| `geoSchemaVersion` | Stored-state schema marker; currently `1`. |
+| `geoStorageNotice` | Most recent byte/count pruning notice and removed run IDs, or `null`. |
+
+The history policy first limits archives to the newest 20 runs, then removes the
+oldest remaining runs until the serialized current run, settings, and history
+fit an approximate 8 MiB budget. The dashboard reports when archived runs were
+pruned. The limit is deliberately below Chrome's typical local-storage quota,
+but it is not a guarantee: a very large current run can still trigger a clear
+"Local storage is full" error.
+
+Writes stamp schema version 1, and state responses expose that version. A tested
+pure migration helper can stamp legacy state and rejects a newer unknown schema,
+but automatic runtime migration is not yet connected because version 1 is the
+initial persisted schema. A future schema change must wire and test migration
+before incrementing the version.
 
 Form settings autosave shortly after edits and once more when the dashboard
 closes. Run progress is saved after each job.
@@ -373,6 +436,8 @@ There is one row for every result/target combination. Columns are:
 | `snippet` | First stored context snippet. |
 | `source_domains` | Semicolon-separated cited domains. |
 | `status` | Adapter result status. |
+| `classification` | `success`, `unavailable`, or `failure`. |
+| `visibility_eligible` | `Yes` only when the result participates in visibility percentages. |
 | `answer_chars` | Answer character count. |
 | `answer_text` | Full extracted answer text. |
 | `thinking_chars` | Visible activity/reasoning character count. |
@@ -387,6 +452,8 @@ spreadsheet compatibility. Values beginning with spreadsheet formula characters
 are prefixed with an apostrophe unless they are numeric, reducing formula
 injection risk when the CSV is opened in spreadsheet software.
 
+![CSV export opened in a spreadsheet](assets/screenshots/Exported%20CSV.png)
+
 ### HTML report
 
 The downloaded filename is:
@@ -396,10 +463,16 @@ geo-report-<run-id>.html
 ```
 
 It is a standalone file with run metadata, visibility by engine, visibility by
-business, and prompt-level target rows. It does not require the extension to view
-and can be opened locally or shared as a file. Review scraped content before
-publishing a report because it may contain generated text, source URLs, and
-prompt data.
+business, separate unavailable/failure counts, and prompt-level target rows. It
+does not require the extension to view and can be opened locally or shared as a
+file. Review scraped content before publishing a report because it may contain
+generated text, source URLs, target names, and prompt data.
+
+![Standalone HTML report with prompt-level result details](assets/screenshots/Exported%20HTML%20Report.png)
+
+The screenshots above contain example campaign inputs, generated excerpts, and
+source fragments. Treat screenshots and exported files as potentially sensitive
+artifacts and review their contents before publishing or sharing them.
 
 ## 12. Permissions and privacy
 
@@ -407,23 +480,39 @@ prompt data.
 
 | Permission | Why it is needed |
 | --- | --- |
-| `activeTab` | Allows manual actions to work with the user-selected active tab. |
-| `scripting` | Injects the shared helper and correct adapter when needed. |
-| `storage` | Persists settings, progress, history, and results locally. |
-| `tabs` | Opens, navigates, observes, focuses, and closes dashboard/worker tabs. |
+| `scripting` | Re-injects the packaged shared helper and correct adapter after navigation or when an already-open supported page needs a manual scrape. It does not fetch remote code. |
+| `storage` | Persists settings, progress, schema state, pruning notices, history, and results in local storage, and preserves the selected manual tab for the browser session. |
+| `tabs` | Reads supported tab URLs, remembers the page used to open the dashboard, selects a recent supported fallback across windows, and opens, navigates, observes, focuses, and closes dashboard/worker tabs. |
 
-Host access is declared only for supported ChatGPT, Google Search, and
-Perplexity URLs. Content scripts are registered for the same supported pages.
+`activeTab` is not requested. The extension already needs explicit host access
+for unattended batch tabs, while `tabs` supplies the tab metadata used by the
+manual-target resolver. Adding `activeTab` would not narrow or replace those
+requirements.
+
+Host access is limited to `https://chatgpt.com/*`,
+`https://chat.openai.com/*`, `https://www.google.com/*`, and the `www` and bare
+Perplexity hosts. The broader Google host pattern is needed to navigate/query
+Search and inject after navigation; the registered Google content script itself
+is limited to `/search*`. No all-sites host permission is requested.
 
 ### Data handling
 
-- Prompts, targets, scraped text, citations, errors, settings, and run history
-  remain in the Chrome profile's extension storage.
-- The code contains no analytics client and no application-owned remote backend.
-- The supported sites necessarily receive prompts that the extension submits
-  through their browser interfaces.
-- Export files are generated locally and handled according to the browser's
-  download settings.
+- Raw form values, parsed prompts and targets, full scraped answer and visible
+  activity/reasoning text, citations, match snippets, errors, settings, and run
+  history are written to the Chrome profile's extension storage.
+- The originating manual-tab identifier is stored only in
+  `chrome.storage.session`; it does not persist across browser sessions.
+- The code contains no analytics client, telemetry collector, or
+  project-operated remote backend.
+- Prompts submitted by **Start Batch** or **Run Active Tab** are sent to the
+  selected supported site through its normal browser interface. Those sites may
+  process prompts, account data, and page interactions under their own policies.
+- **Scrape Active Tab** reads the visible supported page without submitting a
+  prompt. Packaged content scripts still execute within the declared host scope.
+- CSV and HTML export files are generated locally, handled according to the
+  browser's download settings, and can include full prompt, answer, visible
+  activity/reasoning, citation, target, and match data.
+- The project does not automatically upload local run history or exports.
 
 Before using the extension with confidential information, consider the privacy
 policies and account settings of the supported engines as well as who can access
@@ -461,8 +550,8 @@ Dashboard-to-background messages:
 | --- | --- |
 | `START_BATCH_RUN` | Validate settings and begin a batch. |
 | `CANCEL_BATCH_RUN` | Request cancellation and close temporary tabs. |
-| `SCRAPE_ACTIVE_TAB` | Scrape the current supported tab. |
-| `RUN_PROMPT_ACTIVE_TAB` | Run the first prompt in the current supported tab. |
+| `SCRAPE_ACTIVE_TAB` | Resolve and scrape the originating or most recently used supported tab. |
+| `RUN_PROMPT_ACTIVE_TAB` | Run the first prompt in that resolved supported tab. |
 | `GET_GEO_STATE` | Read run, history, and settings. |
 | `SAVE_GEO_SETTINGS` | Persist form values. |
 | `CLEAR_GEO_HISTORY` | Remove archived runs. |
@@ -485,6 +574,12 @@ Run statuses include `running`, `complete`, `cancelled`, and `failed`. Individua
 adapter results normally use `ok`, plus engine-specific statuses such as
 `no-answer-found`, `no-ai-overview`, and `ai-overview-empty`.
 
+`ok` is a successful, visibility-eligible extraction. `no-ai-overview` is an
+unavailable surface rather than a failed or negative mention. Other statuses
+are technical failures. During batch and active-tab runs those failures are
+retried as configured and, after exhaustion, recorded in `errors` rather than
+added as eligible results.
+
 A job can fail because of:
 
 - a signed-out or blocked session;
@@ -499,6 +594,12 @@ A job can fail because of:
 Failed jobs are recorded in the run's `errors` array. The batch proceeds after
 the configured retries are exhausted. A fatal runner failure marks the run
 `failed` and archives it.
+
+If a stored run still says `running` after the service worker has restarted, the
+next `GET_GEO_STATE` request changes it to `failed`, clears `current`, appends an
+error with reason `worker-interrupted`, sets finish/update timestamps, and
+archives the partial run. The extension preserves completed results but does not
+resume the interrupted job automatically.
 
 ## 15. Troubleshooting
 
@@ -537,13 +638,23 @@ present before treating it as an extraction problem.
 Keep the dashboard open, reduce batch size, increase the delay, and check for
 captchas or signed-out background tabs. Chrome can suspend Manifest V3 service
 workers. Since progress is stored after each job, completed partial results may
-still be available for export.
+still be available for export. Reopening or refreshing the dashboard causes a
+stale `running` run to be marked `failed` and archived; it does not resume the
+pending job.
+
+### Older history disappeared
+
+Archived runs are capped by both count and estimated serialized size. When more
+than 20 runs exist, or the current run, settings, and history approach the 8 MiB
+budget, the oldest archives are removed first and the dashboard displays a
+pruning notice. Export important runs before large batches.
 
 ### Mentions are false positives or false negatives
 
 Review aliases and domains first. Remove overly broad aliases and add exact
 business names or domains that appear in the output. Remember that matching is
-text based and that source/activity checks use substring matching.
+lexical: terms use Unicode-aware boundaries, while source domains use exact-host
+or subdomain relationships.
 
 ## 16. Maintainer guide
 
@@ -552,13 +663,55 @@ text based and that source/activity checks use substring matching.
 | File | Responsibility |
 | --- | --- |
 | `manifest.json` | Metadata, permissions, background registration, host access, and automatic content-script registration. |
-| `src/background.js` | Dashboard window management, parsing, target matching, tab lifecycle, retries, cancellation, runs, history, and message dispatch. |
+| `src/background.js` | Dashboard window management, active-tab resolution, tab lifecycle, retries, cancellation, runs, history, and message dispatch. |
 | `src/common.js` | Shared DOM helpers, normalized payloads, job registry, persistence, and content-message routing. |
+| `src/core/parsing.js` | Prompt, target, domain, and bounded-number parsing. |
+| `src/core/matching.js` | Bounded lexical matching, hostname matching, snippets, and result enrichment. |
+| `src/core/results.js` | Status classification and visibility aggregation. |
+| `src/core/storage-policy.js` | Schema constants, byte estimation, history pruning, and migration helper. |
 | `src/adapters/chatgpt.js` | ChatGPT selectors, prompt submission, completion detection, thinking-panel expansion, answer/source extraction. |
 | `src/adapters/google-aio.js` | AI Overview candidate scoring, expansion, UI-text cleanup, answer extraction, and Google redirect normalization. |
 | `src/adapters/perplexity.js` | Perplexity composer handling, answer wait logic, and answer/activity/source extraction. |
 | `src/popup/popup.html` | Dashboard structure and styling. |
 | `src/popup/popup.js` | Form state, rendering, summaries, actions, CSV creation, and report creation. |
+| `tests/unit/` | Deterministic tests for shared logic and common content helpers. |
+| `tests/adapters/`, `tests/fixtures/` | Adapter harness, fixture-contract checks, and sanitized DOM scenarios. |
+| `scripts/` | Syntax, style, lint, manifest, package, secret, and test checks. |
+
+### Automated testing and CI
+
+Use Node.js 22 or newer. From a clean checkout:
+
+```sh
+npm ci
+npm run check
+```
+
+`npm run check` runs syntax, formatting, lint, manifest-reference,
+release-package, secret-pattern, unit, and adapter-fixture checks. Focused test
+commands are:
+
+```sh
+npm test
+npm run test:unit
+npm run test:adapters
+```
+
+GitHub Actions runs the full deterministic check on Node.js 22 and 24 for pushes,
+pull requests, and manual dispatches. Pull requests also receive dependency
+review. CI does not sign in to supported sites or run live automation.
+
+Adapter fixtures live under `tests/fixtures/<engine>/` as a paired
+`<scenario>.case.json` metadata file and `<scenario>.fragment.html` DOM fragment.
+Start from `tests/fixtures/_template/`. Keep fixtures minimal and synthetic or
+aggressively sanitized: never commit full authenticated pages, account names,
+real prompts, cookies, headers, tokens, tracking parameters, or private generated
+answers. Every selector regression should include a fixture that reproduces the
+status or extraction path.
+
+Fixtures do not replace live smoke testing. Before release, load the unpacked
+extension in a clean Chrome profile and record the browser/OS version, account
+state, locale, date, and sanitized outcome for each supported engine.
 
 ### Updating selectors safely
 
@@ -578,7 +731,7 @@ text based and that source/activity checks use substring matching.
 
 Before publishing a revision:
 
-1. Validate that `manifest.json` parses and all referenced scripts exist.
+1. Run `npm ci` and `npm run check` from a clean checkout.
 2. Search the repository for obsolete names, external assets, credentials, and
    personal paths.
 3. Load the extension from a clean Chrome profile if possible.
@@ -590,7 +743,9 @@ Before publishing a revision:
 9. Open the exported CSV in a spreadsheet and the HTML report in a browser.
 10. Confirm that **Clear History** and **Refresh + Clear Data** behave as
     documented.
-11. Update the manifest version and release notes when preparing a release.
+11. Confirm permission prompts match the documented rationale.
+12. Update the manifest/package version and release notes when preparing a
+    release.
 
 ## 17. Known limitations
 
@@ -599,15 +754,21 @@ Before publishing a revision:
   time, model, mode, or personalization.
 - Only rendered content is available; hidden reasoning is intentionally out of
   scope.
-- Prompt parsing treats commas as separators.
+- Prompts are newline-delimited; a multi-line prompt cannot currently be entered
+  as one job.
 - Matching is lexical and can require careful aliases to represent an entity
   accurately.
 - Runs are sequential and local to one Chrome profile.
-- History is capped at 20 archived runs.
+- History is capped at 20 archived runs and an approximate 8 MiB budget; large
+  current runs can still exhaust storage.
+- Worker-interrupted runs are archived as failed with partial results and are not
+  automatically resumed.
+- Stored state uses schema version 1, but automatic runtime migration for future
+  schema changes is not yet integrated.
 - Reports summarize mention presence, not sentiment, rank, prominence, citation
   quality, or factual accuracy.
 - There is no scheduler, cloud synchronization, authentication layer, engine API
-  integration, automated test suite, or selector-version service.
+  integration, live-site CI suite, or selector-version service.
 
 ## 18. Responsible use
 

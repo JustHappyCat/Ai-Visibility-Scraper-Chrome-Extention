@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "engine": "perplexity",
+  "state": "no-answer",
+  "description": "Composer-only state with no answer root.",
+  "source": "synthetic",
+  "expected": { "status": "no-answer-found" },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "Synthetic empty page state."
+  }
+}

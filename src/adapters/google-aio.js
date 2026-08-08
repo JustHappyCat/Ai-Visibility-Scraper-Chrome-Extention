@@ -46,6 +46,21 @@
     '.FkX2oe',
   ];
 
+  // These markers are intentionally narrower than Google's ordinary result
+  // containers. A candidate must contain one of the proven AI Overview markers
+  // below; text length, links, and a generic "Show more" control are never
+  // sufficient evidence on their own.
+  const AIO_ROOT_SELECTORS = [
+    '[data-attrid="SGE"]',
+    '[data-subtree="mfc"]',
+    "#m-x-content",
+    '[data-subtree="aimc"]',
+    'div[aria-label="AI Overview" i]',
+    'div[aria-label="AI Overviews" i]',
+    'section[aria-label="AI Overview" i]',
+    'section[aria-label="AI Overviews" i]',
+  ];
+
   function rawText(node) {
     return (node && (node.innerText || node.textContent) || "").replace(/\u00a0/g, " ");
   }
@@ -135,11 +150,24 @@
     return cleanAioText(rawText(clone));
   }
 
+  function allMatchesIncludingRoot(root, selectors) {
+    if (!root) return [];
+    const matches = new Set(GEO.allMatches(root, selectors));
+    for (const selector of selectors) {
+      try {
+        if (root.matches && root.matches(selector)) matches.add(root);
+      } catch (e) {
+        /* Ignore selectors unsupported by the current DOM implementation. */
+      }
+    }
+    return [...matches];
+  }
+
   function bestAnswerCandidate(container) {
     if (!container) return { text: "", selector: "" };
     let best = { text: "", selector: "" };
     for (const selector of ANSWER_SELECTORS) {
-      const nodes = GEO.allMatches(container, [selector]);
+      const nodes = allMatchesIncludingRoot(container, [selector]);
       for (const node of nodes) {
         if (isHidden(node)) continue;
         const text = textWithoutControls(node);
@@ -168,7 +196,7 @@
     ];
     let bestJoined = { text: "", selector: "" };
     for (const selector of lineGroups) {
-      const text = joinedNodeText(GEO.allMatches(container, [selector]));
+      const text = joinedNodeText(allMatchesIncludingRoot(container, [selector]));
       if (isUsefulAnswerText(text) && text.length > bestJoined.text.length) {
         bestJoined = { text, selector: `${selector} (joined)` };
       }
@@ -191,7 +219,7 @@
       '[data-ve-view] .jloFI',
     ];
     for (const selector of selectors) {
-      const nodes = GEO.allMatches(container, [selector]);
+      const nodes = allMatchesIncludingRoot(container, [selector]);
       for (const node of nodes) {
         const text = textWithoutControls(node);
         if (isUsefulAnswerText(text) && text.length > best.text.length) {
@@ -235,9 +263,9 @@
     return /[.!?)]\s|,\s|:\s/.test(clean) || clean.split(/\s+/).length >= 10;
   }
 
-  function findAioLabels() {
+  function findAioLabels(root) {
     const labels = [];
-    document.querySelectorAll("h1, h2, h3, div, span, strong, [aria-label]").forEach((el) => {
+    allMatchesIncludingRoot(root, ["h1, h2, h3, div, span, strong, [aria-label]"]).forEach((el) => {
       const text = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
       const aria = (el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().toLowerCase();
       if (text === "ai overview" || text === "ai overviews" || aria === "ai overview" || aria === "ai overviews") {
@@ -247,7 +275,31 @@
     return labels;
   }
 
+  function evidenceForContainer(el) {
+    const evidence = [];
+    const has = (selector) => allMatchesIncludingRoot(el, [selector]).length > 0;
+
+    if (has('[data-attrid="SGE"]')) evidence.push("sge-attribute");
+    if (has('[data-subtree="aimc"]')) evidence.push("aimc-subtree");
+    if (has("#m-x-content")) evidence.push("m-x-content");
+    if (
+      has(
+        'div[aria-label="AI Overview" i], div[aria-label="AI Overviews" i], ' +
+          'section[aria-label="AI Overview" i], section[aria-label="AI Overviews" i]'
+      )
+    ) {
+      evidence.push("exact-aria-label");
+    }
+
+    const hasMfc = has('[data-subtree="mfc"]');
+    const hasExactLabel = findAioLabels(el).length > 0;
+    if (hasMfc && hasExactLabel) evidence.push("mfc-with-exact-label");
+
+    return evidence;
+  }
+
   function scoreContainer(el) {
+    const evidence = evidenceForContainer(el);
     const text = textWithoutControls(el);
     const answer = bestAnswerCandidate(el);
     const linkCount = el.querySelectorAll("a[href]").length;
@@ -260,53 +312,24 @@
     if (/ai overview/i.test(rawText(el))) score += 50;
     if (text.length > 12000) score -= text.length;
     if (text.toLowerCase() === "show more") score -= 1000;
-    return { el, text, answer, score, linkCount };
+    return { el, text, answer, score, linkCount, evidence };
   }
 
   function findAioContainer() {
     const candidates = new Map();
-    const xpathRoot = document.evaluate(
-      '//*[@id="rcnt"]/div[1]',
-      document,
-      null,
-      XPathResult.FIRST_ORDERED_NODE_TYPE,
-      null
-    ).singleNodeValue;
-    if (xpathRoot) candidates.set(xpathRoot, xpathRoot);
-
-    GEO.allMatches(document, [
-      "#rcnt > div:first-child",
-      "#rcnt > div:nth-child(1)",
-      '[data-attrid="SGE"]',
-      '[data-subtree="mfc"] #m-x-content',
-      '[data-subtree="mfc"]',
-      "#m-x-content",
-      "div[aria-label*='AI Overview' i]",
-      "div[aria-label*='AI overviews' i]",
-    ]).forEach((el) => candidates.set(el, el));
-
-    for (const label of findAioLabels()) {
-      let node = label;
-      for (let i = 0; i < 10 && node && node.parentElement; i++) {
-        candidates.set(node, node);
-        node = node.parentElement;
-        if (node.id === "search" || node.tagName === "MAIN") {
-          candidates.set(node, node);
-          break;
-        }
-      }
-    }
+    GEO.allMatches(document, AIO_ROOT_SELECTORS).forEach((el) => candidates.set(el, el));
 
     const scored = [...candidates.values()]
       .map(scoreContainer)
-      .filter((item) => item.answer.text.length > 20 || item.text.length > 20 || /show more/i.test(rawText(item.el)))
+      .filter((item) => item.evidence.length > 0)
       .sort((a, b) => b.score - a.score);
 
     return scored[0] || null;
   }
 
   async function expandAio(container) {
-    const buttons = GEO.allMatches(container || document, [
+    if (!container) return 0;
+    const buttons = GEO.allMatches(container, [
       "button",
       "[role='button']",
       "[aria-label*='Show more' i]",
@@ -315,7 +338,9 @@
     for (const button of buttons) {
       const text = rawText(button).replace(/\s+/g, " ").trim().toLowerCase();
       const aria = (button.getAttribute("aria-label") || "").toLowerCase();
-      if (text === "show more" || aria.includes("show more")) {
+      const isAioShowMore =
+        text === "show more" || aria === "show more" || (aria.includes("show more") && aria.includes("ai overview"));
+      if (isAioShowMore) {
         try {
           button.click();
           clicked++;
@@ -372,7 +397,7 @@
     if (expandedButtons) match = findAioContainer() || match;
 
     const answer = bestAnswerCandidate(match.el);
-    const answerText = answer.text || textWithoutControls(match.el);
+    const answerText = answer.text;
     const sources = getSources(match.el);
     const uiOnly = !isUsefulAnswerText(answerText);
 
@@ -389,7 +414,7 @@
         candidateScore: match.score,
         candidateTextChars: match.text.length,
         candidateAnswerChars: answer.text.length,
-        rawContainerText: cleanAioText(rawText(match.el)).slice(0, 500),
+        detectionEvidence: match.evidence,
       },
     });
   }

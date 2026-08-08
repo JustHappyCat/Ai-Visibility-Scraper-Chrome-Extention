@@ -1,0 +1,35 @@
+name: Supported-site selector breakage
+description: Report a sanitized third-party UI compatibility regression
+title: "[Selector]: "
+labels: [selector-breakage]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Never attach full authenticated pages. Remove account data, prompts,
+        cookies, tokens, tracking parameters, and unrelated answer content.
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      options: [ChatGPT, Google AI Overview, Perplexity]
+    validations:
+      required: true
+  - type: input
+    id: locale
+    attributes:
+      label: Browser locale and region
+  - type: textarea
+    id: state
+    attributes:
+      label: Visible page state
+      description: Describe login, captcha, answer completion, and collapsed panels.
+    validations:
+      required: true
+  - type: textarea
+    id: debug
+    attributes:
+      label: Sanitized adapter debug result
+    validations:
+      required: true
+

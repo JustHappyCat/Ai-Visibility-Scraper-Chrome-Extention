@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "engine": "google-aio",
+  "state": "scenario-name",
+  "description": "Explain the site state represented by this minimal fragment.",
+  "source": "synthetic",
+  "expected": {
+    "status": "ok"
+  },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "Synthetic example.com content only."
+  }
+}

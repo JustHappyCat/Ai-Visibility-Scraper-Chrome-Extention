@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "engine": "google-aio",
+  "state": "overview-present",
+  "description": "Synthetic AI Overview with one bounded answer and citation.",
+  "source": "synthetic",
+  "expected": { "status": "ok" },
+  "sanitization": {
+    "containsPersonalData": false,
+    "containsAuthenticationData": false,
+    "notes": "Fictional example.test content only."
+  }
+}

@@ -238,12 +238,25 @@
     }
   }
 
-  async function waitForCompletion() {
-    // Wait for generation to START (stop button appears) — but don't fail if it's quick.
-    await GEO.waitFor(() => getStopButton(), { timeout: 15000 }).catch(() => {});
-    // Wait for generation to FINISH (stop button gone).
-    await GEO.waitFor(() => !getStopButton(), { timeout: 180000 });
-    // Small stability delay so the final DOM settles.
+  async function waitForCompletion(previousText) {
+    // A fast response may finish before the stop button is observed, so accept
+    // either positive start evidence or a changed answer. If neither happens,
+    // submission did not produce a usable generation.
+    const startEvidence = await GEO.waitFor(() => {
+      const answer = getAnswerText(getLastAssistantTurn());
+      if (getStopButton()) return "generating";
+      if (answer && answer !== previousText) return "answer-changed";
+      return "";
+    }, { timeout: 20000, interval: 250 }).catch(() => "");
+    if (!startEvidence) throw new Error("ChatGPT generation did not start.");
+
+    if (getStopButton()) {
+      await GEO.waitFor(() => !getStopButton(), { timeout: 180000, interval: 500 });
+    }
+    await GEO.waitFor(() => {
+      const answer = getAnswerText(getLastAssistantTurn());
+      return answer && answer !== previousText;
+    }, { timeout: 30000, interval: 500 });
     await GEO.sleep(1000);
   }
 
@@ -289,11 +302,11 @@
     if (!prompt) throw new Error("No prompt provided.");
     const previousText = getAnswerText(getLastAssistantTurn());
     await submitPrompt(prompt);
-    await waitForCompletion();
+    await waitForCompletion(previousText);
     await waitForAnswerChange(previousText);
     const expanded = await expandThinking();
     const result = scrape();
-    if (previousText && result.answerText === previousText) {
+    if (result.status !== "ok" || !result.answerText || result.answerText === previousText) {
       throw new Error("No new ChatGPT answer detected after submitting the prompt.");
     }
     result.debug.expandedPanels = expanded;

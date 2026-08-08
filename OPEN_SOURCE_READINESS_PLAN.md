@@ -308,8 +308,7 @@ in their path/query, and empty/malformed values.
 
 Blocked by DEC-03.
 
-- Prefer one prompt per line because natural prompts commonly contain commas, or
-  provide an explicit CSV-aware input mode.
+- Use one prompt per line because natural prompts commonly contain commas.
 - Preserve backward compatibility through a documented migration if the format
   changes.
 - Validate retry and delay values as finite integers within explicit limits.
