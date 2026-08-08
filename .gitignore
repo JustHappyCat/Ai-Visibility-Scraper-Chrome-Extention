@@ -1,0 +1,26 @@
+# Operating system and editor artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies, test output, and packaged releases
+node_modules/
+coverage/
+test-results/
+dist/
+*.zip
+
+# Local exports produced by the extension
+geo-results-*.csv
+geo-report-*.html

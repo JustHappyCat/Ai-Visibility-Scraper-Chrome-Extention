@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "GEO Visibility Scraper",
+  "version": "0.2.0",
+  "description": "Batch GEO visibility tracker with AI answer scraping, target matching, history, CSV export, and HTML reports.",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*",
+    "https://www.google.com/*",
+    "https://www.perplexity.ai/*",
+    "https://perplexity.ai/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open GEO Visibility Scraper"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+      "js": ["src/common.js", "src/adapters/chatgpt.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.google.com/search*"],
+      "js": ["src/common.js", "src/adapters/google-aio.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.perplexity.ai/*", "https://perplexity.ai/*"],
+      "js": ["src/common.js", "src/adapters/perplexity.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
