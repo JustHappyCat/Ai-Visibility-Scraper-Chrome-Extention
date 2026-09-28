@@ -276,11 +276,15 @@ fails, or reaches the 210-second polling timeout.
 
 ### ChatGPT
 
-The adapter selects the latest assistant turn, reads its Markdown/prose content,
-attempts to expand a visible Activity/Thinking/Reasoning control, and gathers
-external citation links from that turn. During automation it fills the composer,
-submits the prompt, waits for generation to start and finish, and checks that a
-new answer replaced the prior answer.
+The adapter selects the latest assistant turn across the older
+`data-message-author-role` markup and newer `data-conversation-role` content
+inside `data-turn-key` containers. It searches the enclosing turn for the
+rendered answer body because newer layouts can place it beside the assistant
+role node, and removes a leading “ChatGPT said:” label when present. It also
+attempts to expand a visible Activity/Thinking/Reasoning control and gathers
+external citation links from that turn. During automation it finds a visible
+composer, fills it, submits the prompt, waits for generation to start and
+finish, and checks that a new answer replaced the prior answer.
 
 The adapter captures only a summary or activity panel that ChatGPT visibly
 renders. It does not access hidden reasoning.

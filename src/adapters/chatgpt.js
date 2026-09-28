@@ -9,10 +9,14 @@
   function getLastAssistantTurn() {
     const assistants = GEO.allMatches(document, [
       '[data-message-author-role="assistant"]',
-      'article[data-turn="assistant"]',
-      'article[data-testid^="conversation-turn"] [data-message-author-role="assistant"]',
+      // Newer ChatGPT renders assistant content under a role on the message
+      // body, while older layouts use data-message-author-role / data-turn.
+      '[data-conversation-role="assistant"]',
+      '[data-turn="assistant"]',
+      '[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]',
     ]).filter((el) =>
       el.getAttribute("data-message-author-role") === "assistant" ||
+      el.getAttribute("data-conversation-role") === "assistant" ||
       el.getAttribute("data-turn") === "assistant"
     );
 
@@ -27,23 +31,62 @@
 
   function getTurnContainer(assistant) {
     if (!assistant) return null;
-    if (assistant.matches('article[data-turn="assistant"], article[data-testid^="conversation-turn"]')) {
-      return assistant;
-    }
-    return assistant.closest(
-      'article[data-turn="assistant"], article[data-testid^="conversation-turn"], article'
-    ) || assistant;
+    // Prefer the actual turn shell over an inner assistant article/role node.
+    // In newer layouts the role node can contain only its accessible label,
+    // while the rendered answer is a sibling inside the keyed turn shell.
+    const shell = assistant.closest('[data-turn-key], [data-testid^="conversation-turn-"]');
+    if (shell) return shell;
+    if (assistant.matches('[data-turn="assistant"], article')) return assistant;
+    return assistant.closest('[data-turn="assistant"], article') || assistant;
+  }
+
+  function cleanAnswerText(text) {
+    return String(text || "")
+      .replace(/\s+/g, " ")
+      .replace(/^(?:ChatGPT said|Assistant)\s*:\s*/i, "")
+      .trim();
+  }
+
+  function answerAfterAssistantLabel(text) {
+    const value = String(text || "").replace(/\s+/g, " ").trim();
+    const labels = [...value.matchAll(/(?:ChatGPT said|Assistant)\s*:\s*/gi)];
+    const lastLabel = labels[labels.length - 1];
+    return lastLabel
+      ? cleanAnswerText(value.slice(lastLabel.index + lastLabel[0].length))
+      : "";
   }
 
   function getAnswerText(turn) {
     if (!turn) return "";
-    // The rendered markdown body is the cleanest source of answer text.
-    const md = GEO.firstMatch(turn, [
-      ".markdown",
+    // New turn shells can put the answer body beside the role/label node. Search
+    // the enclosing turn first, preferring Markdown under an assistant role.
+    const root = getTurnContainer(turn) || turn;
+    const selectors = [
+      '[data-conversation-role="assistant"] .markdown',
       '[data-message-author-role="assistant"] .markdown',
+      '[data-conversation-role="assistant"] .markdown-new-styling',
+      '[data-message-author-role="assistant"] .markdown-new-styling',
+      ".markdown",
+      ".markdown-new-styling",
       ".prose",
-    ]);
-    return GEO.text(md || turn);
+      '[data-conversation-role="assistant"]',
+      '[data-message-author-role="assistant"]',
+    ];
+
+    for (const selector of selectors) {
+      const texts = GEO.allMatches(root, [selector])
+        .map((el) => cleanAnswerText(GEO.text(el)))
+        .filter(Boolean)
+        .sort((a, b) => b.length - a.length);
+      if (texts.length) return texts[0];
+    }
+
+    // A role node may contain both the screen-reader label and the answer.
+    const roleText = cleanAnswerText(GEO.text(turn));
+    if (roleText) return roleText;
+
+    // Some turn shells expose their answer only in combined rendered text.
+    return answerAfterAssistantLabel(GEO.text(root));
   }
 
   function thinkingLabel(text) {
@@ -179,26 +222,45 @@
 
   // ---- Automation: submit prompt -> wait -> expand thinking -> scrape ----
 
-  function getComposer() {
-    return GEO.firstMatch(document, [
-      "#prompt-textarea",
-      'div[contenteditable="true"]',
-      "textarea",
-    ]);
+  function isVisible(el) {
+    if (!el || el.hidden || el.getAttribute("aria-hidden") === "true") return false;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) {
+      return false;
+    }
+    return typeof el.getClientRects !== "function" || el.getClientRects().length > 0;
   }
 
-  function getSendButton() {
-    return GEO.firstMatch(document, [
+  function getComposer() {
+    return GEO.allMatches(document, [
+      "#prompt-textarea",
+      '[data-testid="prompt-textarea"]',
+      "#mobile-composer-prompt",
+      'textarea[name="prompt-textarea"]',
+      '[contenteditable="true"][role="textbox"]',
+      '[role="textbox"][contenteditable="true"]',
+      'div[contenteditable="true"]',
+      "textarea",
+    ]).find((el) => isVisible(el) && !el.disabled && !el.readOnly);
+  }
+
+  function getSendButton(composer) {
+    const form = composer && composer.closest("form");
+    const root = form || document;
+    return GEO.allMatches(root, [
+      "#composer-submit-button",
       'button[data-testid="send-button"]',
+      'button[type="submit"]',
       'button[aria-label*="Send" i]',
-    ]);
+      'button[aria-label*="Submit" i]',
+    ]).find((el) => isVisible(el) && !el.disabled && el.getAttribute("aria-disabled") !== "true");
   }
 
   function getStopButton() {
-    return GEO.firstMatch(document, [
+    return GEO.allMatches(document, [
       'button[data-testid="stop-button"]',
       'button[aria-label*="Stop" i]',
-    ]);
+    ]).find((el) => isVisible(el));
   }
 
   function setComposerText(el, text) {
@@ -227,8 +289,8 @@
     if (!composer) throw new Error("ChatGPT composer not found.");
     setComposerText(composer, prompt);
     await GEO.sleep(200);
-    const btn = getSendButton();
-    if (btn && !btn.disabled) {
+    const btn = getSendButton(composer);
+    if (btn) {
       btn.click();
     } else {
       // Fallback: press Enter.
