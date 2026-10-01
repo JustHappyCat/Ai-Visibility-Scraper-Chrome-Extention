@@ -4,6 +4,7 @@
   "version": "0.3.0",
   "description": "Experimental GEO visibility tracker with AI answer scraping, local history, CSV export, and HTML reports.",
   "permissions": ["scripting", "storage", "tabs"],
+  "optional_permissions": ["debugger"],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*",

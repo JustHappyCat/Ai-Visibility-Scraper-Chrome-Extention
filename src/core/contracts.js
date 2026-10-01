@@ -13,7 +13,8 @@ const MESSAGE_FIELDS = Object.freeze({
   SAVE_GEO_SETTINGS: new Set(["type", "config"]),
 });
 
-const CONFIG_FIELDS = new Set(["prompts", "targets", "engines", "throttleMs", "retries"]);
+const CONFIG_FIELDS = new Set(["prompts", "targets", "engines", "throttleMs", "retries", "googleSearch"]);
+const GOOGLE_SEARCH_FIELDS = new Set(["country", "language", "location", "device"]);
 const ADAPTER_STATUSES = new Set(["ok", "no-ai-overview", "no-answer-found", "ai-overview-empty"]);
 
 function isRecord(value) {
@@ -54,12 +55,35 @@ export function validateConfig(value, { requireInputs = false } = {}) {
   const unknownEngine = uniqueEngines.find((engine) => !ENGINE_IDS.includes(engine));
   if (unknownEngine) throw new Error(`Unsupported engine: ${unknownEngine}.`);
 
+  const googleSearchValue = value.googleSearch === undefined ? {} : value.googleSearch;
+  if (!isRecord(googleSearchValue)) throw new Error("Google Search settings must be an object.");
+  assertKnownFields(googleSearchValue, GOOGLE_SEARCH_FIELDS, "Google Search settings");
+  const country = boundedString(googleSearchValue.country, "", 2, "Google country code").trim();
+  const language = boundedString(googleSearchValue.language, "", 35, "Google language code").trim();
+  const location = boundedString(googleSearchValue.location, "", 200, "Google location").trim();
+  const device = boundedString(googleSearchValue.device, "desktop", 10, "Google device").trim().toLowerCase();
+  if (country && !/^[a-z]{2}$/i.test(country)) {
+    throw new Error("Google country code must be a two-letter country code such as IN or US.");
+  }
+  if (language && !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language)) {
+    throw new Error("Google language code must look like en or en-US.");
+  }
+  if (!["desktop", "mobile"].includes(device)) {
+    throw new Error("Google device must be desktop or mobile.");
+  }
+
   const config = {
     prompts: boundedString(value.prompts, "", 1_000_000, "Prompts"),
     targets: boundedString(value.targets, "", 1_000_000, "Targets"),
     engines: uniqueEngines,
     throttleMs: boundedInteger(value.throttleMs, 3000, 0, 600000, "Throttle"),
     retries: boundedInteger(value.retries, 1, 0, 2, "Retries"),
+    googleSearch: {
+      country: country.toUpperCase(),
+      language,
+      location,
+      device,
+    },
   };
 
   if (requireInputs && !config.prompts.trim()) throw new Error("Add at least one prompt.");

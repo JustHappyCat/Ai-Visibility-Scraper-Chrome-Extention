@@ -7,6 +7,7 @@ import {
 } from "./core/parsing.js";
 import { enrichResult } from "./core/matching.js";
 import { classifyResult } from "./core/results.js";
+import { buildSearchURL } from "./core/google-search.js";
 import {
   isTrustedRuntimeSender,
   validateAdapterResult,
@@ -216,11 +217,98 @@ async function getManualTargetTab() {
   return candidates[0];
 }
 
-function engineUrl(engine, prompt) {
+function engineUrl(engine, prompt, googleSearch = {}) {
   if (engine === "google-aio") {
-    return `${ENGINES[engine].home}?q=${encodeURIComponent(prompt)}`;
+    return buildSearchURL(prompt, googleSearch);
   }
   return ENGINES[engine].home;
+}
+
+function mobileUserAgentDetails() {
+  const userAgent = String(globalThis.navigator?.userAgent || "");
+  const browserVersion = userAgent.match(/(?:Chrome|Chromium)\/([\d.]+)/)?.[1] || "120.0.0.0";
+  const majorVersion = browserVersion.split(".")[0];
+  const brands = [
+    { brand: "Not_A Brand", version: "99" },
+    { brand: "Chromium", version: majorVersion },
+    { brand: "Google Chrome", version: majorVersion },
+  ];
+  const fullVersionList = brands.map((item) => ({
+    brand: item.brand,
+    version: item.brand === "Not_A Brand" ? "99.0.0.0" : browserVersion,
+  }));
+  return {
+    userAgent: `Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browserVersion} Mobile Safari/537.36`,
+    userAgentMetadata: {
+      brands,
+      fullVersionList,
+      platform: "Android",
+      platformVersion: "10.0.0",
+      architecture: "",
+      model: "K",
+      mobile: true,
+      bitness: "",
+      wow64: false,
+    },
+  };
+}
+
+async function enableGoogleMobileEmulation(tabId) {
+  const target = { tabId };
+  await chrome.debugger.attach(target, "1.3");
+  try {
+    const { userAgent, userAgentMetadata } = mobileUserAgentDetails();
+    await chrome.debugger.sendCommand(target, "Network.setUserAgentOverride", {
+      userAgent,
+      platform: "Android",
+      userAgentMetadata,
+    });
+    await chrome.debugger.sendCommand(target, "Emulation.setDeviceMetricsOverride", {
+      width: 412,
+      height: 915,
+      deviceScaleFactor: 2.625,
+      mobile: true,
+      screenWidth: 412,
+      screenHeight: 915,
+      screenOrientation: { angle: 0, type: "portraitPrimary" },
+    });
+    await chrome.debugger.sendCommand(target, "Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 5,
+    });
+  } catch (error) {
+    await chrome.debugger.detach(target).catch(() => {});
+    throw error;
+  }
+  return true;
+}
+
+async function disableGoogleMobileEmulation(tabId) {
+  await chrome.debugger.detach({ tabId }).catch(() => {});
+}
+
+async function runGooglePrompt(prompt, googleSearch = {}) {
+  if (cancelRequested) throw new Error("Run cancelled.");
+  let tab;
+  let mobileEmulation = false;
+  try {
+    tab = await chrome.tabs.create({ url: "about:blank", active: false });
+    activeTempTabIds.add(tab.id);
+    if (googleSearch.device === "mobile") {
+      mobileEmulation = await enableGoogleMobileEmulation(tab.id);
+    }
+    tab = await chrome.tabs.update(tab.id, { url: engineUrl("google-aio", prompt, googleSearch) });
+    await waitForTabComplete(tab.id);
+    await sleepCancellable(2500);
+    tab = await chrome.tabs.get(tab.id);
+    return await runPromptInTab(tab, "google-aio", prompt);
+  } finally {
+    if (mobileEmulation && tab?.id) await disableGoogleMobileEmulation(tab.id);
+    if (tab?.id) {
+      activeTempTabIds.delete(tab.id);
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+  }
 }
 
 function canReuseEngineTab(engine) {
@@ -508,7 +596,10 @@ async function runReusableEnginePrompt(engine, prompt, sessions) {
   return runPromptInTab(tab, engine, prompt);
 }
 
-async function runEnginePrompt(engine, prompt, sessions) {
+async function runEnginePrompt(engine, prompt, sessions, googleSearch = {}) {
+  if (engine === "google-aio") {
+    return runGooglePrompt(prompt, googleSearch);
+  }
   if (canReuseEngineTab(engine) && sessions) {
     return runReusableEnginePrompt(engine, prompt, sessions);
   }
@@ -519,7 +610,7 @@ async function runEnginePrompt(engine, prompt, sessions) {
     tab = await chrome.tabs.create({ url: engineUrl(engine, prompt), active: false });
     activeTempTabIds.add(tab.id);
     await waitForTabComplete(tab.id);
-    await sleepCancellable(engine === "google-aio" ? 2500 : 1500);
+    await sleepCancellable(1500);
     tab = await chrome.tabs.get(tab.id);
     return await runPromptInTab(tab, engine, prompt);
   } finally {
@@ -550,6 +641,7 @@ async function startBatch(config) {
     prompts,
     targets,
     engines,
+    googleSearch: config.googleSearch,
     throttleMs,
     retries,
     total: prompts.length * engines.length,
@@ -606,7 +698,7 @@ async function executeBatch(run) {
         for (let attempt = 0; attempt <= current.retries; attempt++) {
           try {
             if (cancelRequested) throw new Error("Run cancelled.");
-            const raw = await runEnginePrompt(engine, prompt, sessions);
+            const raw = await runEnginePrompt(engine, prompt, sessions, current.googleSearch);
             const result = enrichResult(raw, prompt, current.targets, classifyResult);
             if (result.classification.kind === "failure") {
               throw new Error(`Extraction failed with status: ${result.status || "unknown"}.`);
@@ -684,6 +776,7 @@ async function handleActiveRun(msg) {
     prompts: [prompt],
     targets,
     engines: [engine],
+    googleSearch: config.googleSearch,
     throttleMs: 0,
     retries: 0,
     total: 1,
@@ -739,31 +832,39 @@ async function handleActiveRun(msg) {
 
 async function executeActiveRun(tabId, engine, prompt, targets, run) {
   if (cancelRequested) throw new Error("Run cancelled.");
-  let tab = await chrome.tabs.get(tabId);
-  if (engine === "google-aio") {
-    tab = await chrome.tabs.update(tabId, { url: engineUrl(engine, prompt) });
-    await waitForTabComplete(tabId);
-    await sleepCancellable(2500);
-    tab = await chrome.tabs.get(tabId);
+  let mobileEmulation = false;
+  try {
+    let tab = await chrome.tabs.get(tabId);
+    if (engine === "google-aio") {
+      if (run.googleSearch?.device === "mobile") {
+        mobileEmulation = await enableGoogleMobileEmulation(tabId);
+      }
+      tab = await chrome.tabs.update(tabId, { url: engineUrl(engine, prompt, run.googleSearch) });
+      await waitForTabComplete(tabId);
+      await sleepCancellable(2500);
+      tab = await chrome.tabs.get(tabId);
+    }
+    const raw = await runPromptInTab(tab, engine, prompt);
+    const result = enrichResult(raw, prompt, targets, classifyResult);
+    if (result.classification.kind === "failure") {
+      throw new Error(`Extraction failed with status: ${result.status || "unknown"}.`);
+    }
+    const completeRun = Object.assign({}, run, {
+      status: "complete",
+      completed: 1,
+      results: [result],
+      current: null,
+      finishedAt: nowIso(),
+      updatedAt: nowIso(),
+    });
+    await storageSet({
+      [RUN_KEY]: completeRun,
+      [LAST_KEY]: compactRunEnvelope(completeRun),
+    });
+    await appendHistory(completeRun);
+  } finally {
+    if (mobileEmulation) await disableGoogleMobileEmulation(tabId);
   }
-  const raw = await runPromptInTab(tab, engine, prompt);
-  const result = enrichResult(raw, prompt, targets, classifyResult);
-  if (result.classification.kind === "failure") {
-    throw new Error(`Extraction failed with status: ${result.status || "unknown"}.`);
-  }
-  const completeRun = Object.assign({}, run, {
-    status: "complete",
-    completed: 1,
-    results: [result],
-    current: null,
-    finishedAt: nowIso(),
-    updatedAt: nowIso(),
-  });
-  await storageSet({
-    [RUN_KEY]: completeRun,
-    [LAST_KEY]: compactRunEnvelope(completeRun),
-  });
-  await appendHistory(completeRun);
 }
 
 async function recoverInterruptedRun(run) {

@@ -5,6 +5,11 @@ Semantic Versioning after its first public beta.
 
 ## Unreleased
 
+### Added
+
+- Added configurable Google Search country, language, optional UULE city/region,
+  live URL preview, and desktop/mobile emulation for Google AI Overview runs.
+
 ## 0.3.0 — Experimental pre-release (2026-08-08)
 
 ### Added

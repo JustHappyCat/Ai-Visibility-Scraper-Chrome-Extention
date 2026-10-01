@@ -97,7 +97,8 @@
       }
 
       textarea,
-      input {
+      input,
+      select {
         width: 100%;
         border: 1px solid var(--line);
         border-radius: 12px;
@@ -124,12 +125,14 @@
       }
 
       textarea:hover,
-      input:hover {
+      input:hover,
+      select:hover {
         border-color: var(--line-strong);
       }
 
       textarea:focus,
-      input:focus {
+      input:focus,
+      select:focus {
         border-color: rgba(0, 122, 255, 0.62);
         background: #ffffff;
         box-shadow: var(--ring), inset 0 1px 0 #ffffff;
@@ -488,6 +491,43 @@
         min-height: 40px;
       }
 
+      .settings-grid select {
+        width: 100%;
+        min-height: 40px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--field);
+        color: var(--ink);
+        padding: 9px 12px;
+        font: inherit;
+      }
+
+      .search-preview {
+        display: grid;
+        gap: 6px;
+        grid-column: 1 / -1;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.56);
+      }
+
+      .search-preview code {
+        overflow-wrap: anywhere;
+        color: var(--muted);
+        font-size: 10px;
+      }
+
+      .search-preview a {
+        color: var(--cyan-strong);
+        font-weight: 650;
+        text-decoration: none;
+      }
+
+      .search-preview a:hover {
+        text-decoration: underline;
+      }
+
       .toolbar {
         display: flex;
         align-items: center;
@@ -743,6 +783,7 @@
       @media (forced-colors: active) {
         button:focus-visible,
         input:focus-visible,
+        select:focus-visible,
         textarea:focus-visible {
           outline: 2px solid ButtonText;
           outline-offset: 2px;
@@ -801,6 +842,41 @@
               <label for="retries">Retries</label>
               <input id="retries" type="number" min="0" max="2" step="1" value="1" aria-describedby="retries-error" />
               <p id="retries-error" class="field-error" hidden></p>
+            </div>
+          </div>
+          <div class="google-search-settings">
+            <h3>Google AI Overview search setup</h3>
+            <div class="settings-grid">
+              <div>
+                <label for="googleCountry">Country code</label>
+                <input id="googleCountry" type="text" maxlength="2" autocomplete="off" placeholder="IN" aria-describedby="googleCountry-note googleCountry-error" />
+                <p id="googleCountry-note" class="subtle field-note">Optional Google country bias.</p>
+                <p id="googleCountry-error" class="field-error" hidden></p>
+              </div>
+              <div>
+                <label for="googleLanguage">Language code</label>
+                <input id="googleLanguage" type="text" maxlength="35" autocomplete="off" placeholder="en or en-US" aria-describedby="googleLanguage-note googleLanguage-error" />
+                <p id="googleLanguage-note" class="subtle field-note">Optional Google interface/search language.</p>
+                <p id="googleLanguage-error" class="field-error" hidden></p>
+              </div>
+              <div>
+                <label for="googleLocation">City / region (optional)</label>
+                <input id="googleLocation" type="text" maxlength="200" autocomplete="off" placeholder="City, region" aria-describedby="googleLocation-note" />
+                <p id="googleLocation-note" class="subtle field-note">Only added as UULE when entered. Leave country and location empty for Google's unlocalized search.</p>
+              </div>
+              <div>
+                <label for="googleDevice">Device</label>
+                <select id="googleDevice" aria-describedby="googleDevice-note">
+                  <option value="desktop">Desktop</option>
+                  <option value="mobile">Mobile</option>
+                </select>
+                <p id="googleDevice-note" class="subtle field-note">Mobile uses Chrome device emulation. Chrome asks for debugger permission when selected.</p>
+              </div>
+              <div class="search-preview">
+                <span class="subtle">URL preview for the first prompt</span>
+                <a id="googleSearchPreviewLink" href="#" target="_blank" rel="noreferrer" hidden>Open preview in Google</a>
+                <code id="googleSearchPreview">Enter a prompt to preview the Google search URL.</code>
+              </div>
             </div>
           </div>
         </section>

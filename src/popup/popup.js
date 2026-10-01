@@ -2,6 +2,7 @@
 
 import { classifyResult, summarizeResults } from "../core/results.js";
 import { parsePrompts, parseTargetsDetailed } from "../core/parsing.js";
+import { buildSearchURL } from "../core/google-search.js";
 
 const ENGINE_LABELS = {
   chatgpt: "ChatGPT",
@@ -15,6 +16,12 @@ const promptsEl = byId("prompts");
 const targetsEl = byId("targets");
 const throttleEl = byId("throttle");
 const retriesEl = byId("retries");
+const googleCountryEl = byId("googleCountry");
+const googleLanguageEl = byId("googleLanguage");
+const googleLocationEl = byId("googleLocation");
+const googleDeviceEl = byId("googleDevice");
+const googleSearchPreviewEl = byId("googleSearchPreview");
+const googleSearchPreviewLinkEl = byId("googleSearchPreviewLink");
 const output = byId("output");
 const announcementEl = byId("announcement");
 const manualFeedbackEl = byId("manualFeedback");
@@ -64,6 +71,10 @@ function message(type, payload = {}) {
   });
 }
 
+function requestGoogleMobilePermission() {
+  return chrome.permissions.request({ permissions: ["debugger"] });
+}
+
 function configFromForm() {
   return {
     prompts: promptsEl.value,
@@ -71,6 +82,12 @@ function configFromForm() {
     engines: selectedEngines(),
     throttleMs: throttleEl.value,
     retries: retriesEl.value,
+    googleSearch: {
+      country: googleCountryEl.value,
+      language: googleLanguageEl.value,
+      location: googleLocationEl.value,
+      device: googleDeviceEl.value,
+    },
   };
 }
 
@@ -101,7 +118,32 @@ export function validateConfig(config, { requireTargets = true, requireEngines =
     errors.retries = "Enter a whole number from 0 to 2.";
   }
 
+  const googleSearch = config?.googleSearch || {};
+  const country = String(googleSearch.country || "").trim();
+  const language = String(googleSearch.language || "").trim();
+  if (country && !/^[a-z]{2}$/i.test(country)) {
+    errors.googleCountry = "Use a two-letter country code such as IN or US.";
+  }
+  if (language && !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language)) {
+    errors.googleLanguage = "Use a language code such as en or en-US.";
+  }
+
   return { valid: Object.keys(errors).length === 0, errors };
+}
+
+function updateGoogleSearchPreview() {
+  if (!googleSearchPreviewEl || !googleSearchPreviewLinkEl) return;
+  const prompt = parsePrompts(promptsEl.value)[0];
+  if (!prompt) {
+    googleSearchPreviewEl.textContent = "Enter a prompt to preview the Google search URL.";
+    googleSearchPreviewLinkEl.hidden = true;
+    googleSearchPreviewLinkEl.removeAttribute("href");
+    return;
+  }
+  const url = buildSearchURL(prompt, configFromForm().googleSearch);
+  googleSearchPreviewEl.textContent = url;
+  googleSearchPreviewLinkEl.href = url;
+  googleSearchPreviewLinkEl.hidden = false;
 }
 
 function queueSettingsSave() {
@@ -117,8 +159,14 @@ function restoreSettings(settings) {
   targetsEl.value = settings.targets || "";
   throttleEl.value = settings.throttleMs ?? 3000;
   retriesEl.value = settings.retries ?? 1;
+  const googleSearch = settings.googleSearch || {};
+  googleCountryEl.value = googleSearch.country || "";
+  googleLanguageEl.value = googleSearch.language || "";
+  googleLocationEl.value = googleSearch.location || "";
+  googleDeviceEl.value = googleSearch.device === "mobile" ? "mobile" : "desktop";
   setSelectedEngines(settings.engines || Object.keys(ENGINE_LABELS));
   restoredSettings = true;
+  updateGoogleSearchPreview();
 }
 
 function activeRun() {
@@ -174,6 +222,8 @@ const FIELD_CONTROLS = {
   engines: () => hasDocument ? document.querySelector('input[name="engine"]') : null,
   throttle: () => throttleEl,
   retries: () => retriesEl,
+  googleCountry: () => googleCountryEl,
+  googleLanguage: () => googleLanguageEl,
 };
 
 function clearFieldError(field) {
@@ -542,6 +592,12 @@ function initPopup() {
     if (!validateForm({ requireTargets: true, requireEngines: true })) return;
     startBtn.disabled = true;
     try {
+      if (configFromForm().googleSearch.device === "mobile") {
+        const granted = await requestGoogleMobilePermission();
+        if (!granted) {
+          throw new Error("Mobile Google search needs the Chrome debugger permission. Select Desktop or allow the permission.");
+        }
+      }
       await message("START_BATCH_RUN", { config: configFromForm() });
       announce("Batch run started.");
       await refresh();
@@ -580,6 +636,12 @@ function initPopup() {
     if (!validateForm({ requireTargets: false, requireEngines: false })) return;
     runActiveBtn.disabled = true;
     try {
+      if (configFromForm().googleSearch.device === "mobile") {
+        const granted = await requestGoogleMobilePermission();
+        if (!granted) {
+          throw new Error("Mobile Google search needs the Chrome debugger permission. Select Desktop or allow the permission.");
+        }
+      }
       const firstPrompt = parsePrompts(promptsEl.value)[0];
       const response = await message("RUN_PROMPT_ACTIVE_TAB", { prompt: firstPrompt, config: configFromForm() });
       showManualFeedback("ok", "Active-tab run started", response.selectedTab, "<p class=\"subtle\">Progress appears in Run status below.</p>");
@@ -630,7 +692,12 @@ function initPopup() {
       targetsEl.value = "";
       throttleEl.value = 3000;
       retriesEl.value = 1;
+      googleCountryEl.value = "";
+      googleLanguageEl.value = "";
+      googleLocationEl.value = "";
+      googleDeviceEl.value = "desktop";
       setSelectedEngines(Object.keys(ENGINE_LABELS));
+      updateGoogleSearchPreview();
       output.innerHTML = "<h2 id=\"output-heading\">Run status</h2><span class=\"badge ok\">Data cleared</span><p class=\"subtle\">Reloading the extension…</p>";
       announce("All extension data cleared. Reloading.");
       setTimeout(() => location.reload(), 500);
@@ -640,12 +707,35 @@ function initPopup() {
     }
   });
 
-  [promptsEl, targetsEl, throttleEl, retriesEl].forEach((el) => {
+  [promptsEl, targetsEl, throttleEl, retriesEl, googleCountryEl, googleLanguageEl, googleLocationEl].forEach((el) => {
     el.addEventListener("input", () => {
       clearFieldError(el.id);
       clearGeneralError();
+      updateGoogleSearchPreview();
       queueSettingsSave();
     });
+  });
+
+  googleDeviceEl.addEventListener("change", async () => {
+    if (googleDeviceEl.value === "mobile") {
+      try {
+        const granted = await requestGoogleMobilePermission();
+        if (!granted) {
+          googleDeviceEl.value = "desktop";
+          updateGoogleSearchPreview();
+          showGeneralError(new Error("Mobile Google search needs the Chrome debugger permission. Desktop mode remains available."));
+          return;
+        }
+      } catch (error) {
+        googleDeviceEl.value = "desktop";
+        updateGoogleSearchPreview();
+        showGeneralError(error);
+        return;
+      }
+    }
+    clearGeneralError();
+    updateGoogleSearchPreview();
+    queueSettingsSave();
   });
 
   document.querySelectorAll('input[name="engine"]').forEach((el) => {

@@ -28,7 +28,7 @@ provide semantic entity resolution, or send results to an application server.
 | Engine | Supported URLs | Automation method | Important behavior |
 | --- | --- | --- | --- |
 | ChatGPT | `https://chatgpt.com/*`, `https://chat.openai.com/*` | Types into the page composer and waits for completion | Uses a temporary-chat home URL for batch tabs; captures the latest assistant turn. |
-| Google AI Overview | `https://www.google.com/search*` | Navigates to a search URL containing the prompt | Records `no-ai-overview` when no overview is detected. |
+| Google AI Overview | `https://www.google.com/search*` | Navigates to a generated search URL with the prompt and optional locale/device setup | Records `no-ai-overview` when no overview is detected. |
 | Perplexity | `https://www.perplexity.ai/*`, `https://perplexity.ai/*` | Types into the page composer and waits for a new answer | Captures the latest answer-like prose container. |
 
 Chrome is the target browser. The implementation uses Manifest V3 APIs,
@@ -121,6 +121,28 @@ boundaries, but short or generic terms can still create misleading matches.
   3,000 ms. Negative input is treated as zero.
 - **Retries** is the number of additional attempts after an initial failure. The
   default is one and the implementation caps it at two.
+
+### Google AI Overview search setup
+
+These settings apply to each prompt sent to Google AI Overview and are saved
+with the campaign:
+
+- **Country code** is an optional two-letter Google `gl` value, such as `IN` or
+  `US`.
+- **Language code** is an optional Google `hl` value, such as `en` or `en-US`.
+- **City / region** is optional. When present, the extension encodes the text as
+  a UULE location hint. It does not geocode the text, use GPS, or change the
+  network/IP location. When empty, no UULE parameter is added. Leave both
+  country and city/region empty for Google's unlocalized/default search.
+- **Device** defaults to Desktop. Mobile uses Chrome device emulation for the
+  Google tab, including a mobile user agent, viewport, and touch signals. It
+  does not change the device or network used by other sites. The extension
+  requests the optional `debugger` permission when Mobile is selected.
+
+The live URL preview uses the first prompt. Search URLs include `pws=0` and
+`num=10`; these are requests to Google and do not guarantee identical results.
+Google may still personalize or vary results by account, network, query, and
+its own product behavior.
 
 The total job count is:
 
@@ -487,6 +509,7 @@ artifacts and review their contents before publishing or sharing them.
 | `scripting` | Re-injects the packaged shared helper and correct adapter after navigation or when an already-open supported page needs a manual scrape. It does not fetch remote code. |
 | `storage` | Persists settings, progress, schema state, pruning notices, history, and results in local storage, and preserves the selected manual tab for the browser session. |
 | `tabs` | Reads supported tab URLs, remembers the page used to open the dashboard, selects a recent supported fallback across windows, and opens, navigates, observes, focuses, and closes dashboard/worker tabs. |
+| Optional `debugger` | Requested when Mobile is selected. Applies mobile user-agent, viewport, and touch emulation to the Google tab; the extension detaches after the search finishes. |
 
 `activeTab` is not requested. The extension already needs explicit host access
 for unattended batch tabs, while `tabs` supplies the tab metadata used by the

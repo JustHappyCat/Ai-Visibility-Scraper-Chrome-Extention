@@ -76,9 +76,16 @@ the source, use **Reload** on `chrome://extensions` before testing the change.
    ```
 
 5. Select the engines to query.
-6. Choose the delay between jobs and the number of retries.
-7. Select **Start Batch**.
-8. When results are available, select **Export CSV** or **Export Report**.
+6. Optionally set Google country/language, city/region, and desktop/mobile mode.
+   Leave country and city/region empty for Google's unlocalized search.
+7. Choose the delay between jobs and the number of retries.
+8. Select **Start Batch**.
+9. When results are available, select **Export CSV** or **Export Report**.
+
+Google search settings are saved with the campaign. A city/region is sent as a
+UULE location hint only when supplied; the extension does not geocode it or
+change your network location. Mobile mode uses Chrome device emulation and
+requests the optional `debugger` permission when you select it.
 
 Example targets:
 
